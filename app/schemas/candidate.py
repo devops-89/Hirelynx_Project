@@ -19,7 +19,6 @@ class EmploymentType(str, Enum):
     PART_TIME = "PART_TIME"
     CONTRACT = "CONTRACT"
     INTERNSHIP = "INTERNSHIP"
-    TEMPORARY = "TEMPORARY"
     FREELANCE = "FREELANCE"
 
 class PersonalDetails(BaseModel):
@@ -95,6 +94,7 @@ class CandidateProfile(BaseModel):
     resumeParsedJson: Optional[Any] = None
     resumeLastParsedAt: Optional[datetime] = None
     isProfileCompleted: bool = False
+    subscriptions: Optional[Any] = []
 
     class Config:
         from_attributes = True

@@ -286,18 +286,41 @@ class ScoringEngine:
         keywords: List[str],
         candidate_skills: List[str] = [],
     ) -> Dict[str, Any]:
-        """Legacy scoring for BERT semantic search."""
-        matched = [k for k in keywords if k.lower() in resume_text.lower()]
-        kw_score = (len(matched) / len(keywords) * 100) if keywords else 0.0
+        """Fine-tuned AI scoring for Global Candidate Search."""
+        resume_text_lower = resume_text.lower()
+        cand_skills_lower = [s.lower() for s in candidate_skills]
+
+        matched = []
+        raw_kw_score = 0.0
         
+        for k in keywords:
+            k_low = k.lower()
+            if k_low in resume_text_lower:
+                matched.append(k)
+                # Boost if explicitly in the candidate's skills list
+                if any(k_low in cs for cs in cand_skills_lower):
+                    raw_kw_score += 1.5
+                else:
+                    raw_kw_score += 1.0
+
+        if keywords:
+            # Normalize kw_score to max 100
+            kw_score = min(100.0, (raw_kw_score / len(keywords)) * 100)
+        else:
+            kw_score = 0.0
+
         sim = 0.0
+        normalized_sim = 0.0
         if self.encoder and query_embedding is not None:
              try:
                  resume_emb = self.encoder.encode([resume_text], convert_to_numpy=True)
-                 sim = cosine_similarity(query_embedding.reshape(1, -1), resume_emb.reshape(1, -1))[0][0]
+                 sim = float(cosine_similarity(query_embedding.reshape(1, -1), resume_emb.reshape(1, -1))[0][0])
+                 # Normalize similarity: shift by 0.15, scale by 0.55
+                 normalized_sim = max(0.0, min(100.0, (sim - 0.15) / 0.55 * 100))
              except Exception: pass
              
-        final = round((kw_score * 0.5) + (sim * 100 * 0.5), 2)
+        # 40% Keyword Match, 60% Semantic Match
+        final = round((kw_score * 0.4) + (normalized_sim * 0.6), 2)
         return {
             "score": final,
             "matched_skills": matched,

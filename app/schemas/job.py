@@ -41,7 +41,8 @@ class JobProfile(BaseModel):
         extra = "allow"
 
 class CandidateSearchFilters(BaseModel):
-    category:      Optional[str]       = None
+    industry:      Optional[str]       = None
+    companies:     Optional[List[str]] = None
     locations:     Optional[List[str]] = None
     skills:        Optional[List[str]] = None
     jobType:       Optional[List[str]] = None

@@ -144,7 +144,7 @@ def _build_card(row, extra: Dict) -> Dict[str, Any]:
      is_verified, user_status, created_at,
      profile_id, skills, education, work_exp,
      parse_status, personal_details_col, parsed_json,
-     job_match_score, matched_skills_list, application_status) = row
+     job_match_score, matched_skills_list, application_status, subscriptions_json) = row
 
     full_name            = f"{first_name or ''} {last_name or ''}".strip() or None
     skill_list           = _skill_names(skills)
@@ -172,6 +172,7 @@ def _build_card(row, extra: Dict) -> Dict[str, Any]:
         "resumeParseStatus": parse_status,
         "jobMatchScore":    float(job_match_score) if job_match_score is not None else None,
         "matchedSkills":    matched_skills_list if isinstance(matched_skills_list, list) else [],
+        "subscriptions":    subscriptions_json if subscriptions_json else [],
     }
     card.update(extra)
     return card
@@ -199,7 +200,8 @@ _CANDIDATE_SQL = text("""
         cp."resumeParsedJson",
         m."jobMatchScore",
         m."matchedSkillsList",
-        ja.status       AS application_status
+        ja.status       AS application_status,
+        subs.subscriptions_json
     FROM users u
     LEFT JOIN candidate_profiles cp ON cp."userId" = u.id
     LEFT JOIN LATERAL (
@@ -225,6 +227,47 @@ _CANDIDATE_SQL = text("""
             END
         LIMIT 1
     ) ja ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT json_agg(
+            json_build_object(
+                'id', s.id,
+                'startDate', s."startDate",
+                'endDate', s."endDate",
+                'status', s.status,
+                'createdAt', s."createdAt",
+                'updatedAt', s."updatedAt",
+                'deletedAt', s."deletedAt",
+                'plan', json_build_object(
+                    'id', p.id,
+                    'name', p.name,
+                    'role', p.role,
+                    'description', p.description,
+                    'price', p.price,
+                    'currency', p.currency,
+                    'durationDays', p."durationDays",
+                    'isActive', p."isActive",
+                    'createdAt', p."createdAt",
+                    'updatedAt', p."updatedAt",
+                    'deletedAt', p."deletedAt",
+                    'limits', COALESCE((
+                        SELECT json_agg(
+                            json_build_object(
+                                'id', pl.id,
+                                'key', pl.key,
+                                'value', pl.value
+                            )
+                        )
+                        FROM plan_limits pl
+                        WHERE pl."planId" = p.id
+                    ), '[]'::json)
+                )
+            )
+        ) AS subscriptions_json
+        FROM subscriptions s
+        JOIN plans p ON p.id = s."planId"
+        WHERE s."userId" = u.id
+          AND s."deletedAt" IS NULL
+    ) subs ON TRUE
     WHERE u.role = 'CANDIDATE'
       AND u."deletedAt" IS NULL
     ORDER BY u.id DESC
@@ -274,7 +317,8 @@ class SearchService:
         elif hasattr(f, "dict"):
             f = f.dict(exclude_none=False)
 
-        category       = (f.get("category") or "").strip().lower()
+        industry       = (f.get("industry") or f.get("category") or "").strip().lower()
+        companies      = [c.strip().lower() for c in (f.get("companies") or []) if c]
         locations      = [l.strip().lower() for l in (f.get("locations") or []) if l]
         req_skills     = [s.strip().lower() for s in (f.get("skills") or []) if s]
         job_types      = [j.strip().upper().replace("-", "_") for j in (f.get("jobType") or []) if j]
@@ -285,13 +329,24 @@ class SearchService:
         min_score      = float(f.get("minMatchScore") or 0.0)
         query_low      = (query or "").strip().lower()
 
+        # Pre-compute query embedding once if query is provided
+        query_embedding = None
+        keywords = []
+        if query_low:
+            keywords = [k for k in re.split(r"[\s,]+", query_low) if len(k) > 2]
+            try:
+                if scoring_engine.encoder:
+                    query_embedding = scoring_engine.encoder.encode([query])[0]
+            except Exception as e:
+                logger.warning(f"Could not encode query: {e}")
+
         results = []
         for row in rows:
             (user_id, email, first_name, last_name, avatar, profile_pic,
              is_verified, user_status, created_at,
              profile_id, skills, education, work_exp,
              parse_status, personal_details_col, parsed_json,
-             job_match_score, matched_skills_list, application_status) = row
+             job_match_score, matched_skills_list, application_status, subscriptions_json) = row
 
             skill_names = _skill_names(skills)
             skill_lower = [s.lower() for s in skill_names]
@@ -305,11 +360,11 @@ class SearchService:
                 if float(job_match_score) < min_score:
                     continue
 
-            # ── Category filter ─────────────────────────────────────────────
+            # ── Industry filter ─────────────────────────────────────────────
             # Uses a keyword map so "IT" matches developers, engineers, etc.
             # Falls back to work experience roles, then resume text.
-            if category:
-                _CATEGORY_KEYWORDS = {
+            if industry:
+                _INDUSTRY_KEYWORDS = {
                     "it": [
                         "developer", "engineer", "software", "web", "frontend", "backend",
                         "fullstack", "full stack", "devops", "cloud", "data", "machine learning",
@@ -325,30 +380,48 @@ class SearchService:
                     "finance": ["accountant", "finance", "banking", "cpa", "audit", "tax", "financial"],
                     "hr": ["human resources", "hr", "recruiter", "talent", "payroll"],
                 }
-                kw_list = _CATEGORY_KEYWORDS.get(category, [category])
+                kw_list = _INDUSTRY_KEYWORDS.get(industry, [industry])
 
                 # Check 1: structured skill names
-                category_hit = any(
+                industry_hit = any(
                     any(kw in skill for kw in kw_list)
                     for skill in skill_lower
                 )
 
                 # Check 2: work experience roles / job titles
-                if not category_hit and work_exp and isinstance(work_exp, list):
+                if not industry_hit and work_exp and isinstance(work_exp, list):
                     role_text = " ".join(
                         f"{exp.get('role','')} {exp.get('jobTitle','')}".lower()
                         for exp in work_exp if isinstance(exp, dict)
                     )
-                    category_hit = any(kw in role_text for kw in kw_list)
+                    industry_hit = any(kw in role_text for kw in kw_list)
 
                 # Check 3: resume text snippet
-                if not category_hit and parsed_json and isinstance(parsed_json, dict):
+                if not industry_hit and parsed_json and isinstance(parsed_json, dict):
                     resume_head = (
                         parsed_json.get("text") or parsed_json.get("_raw_text") or ""
                     )[:1000].lower()
-                    category_hit = any(kw in resume_head for kw in kw_list)
+                    industry_hit = any(kw in resume_head for kw in kw_list)
 
-                if not category_hit:
+                if not industry_hit:
+                    continue
+
+            # ── Companies filter ──────────────────────────────────────────
+            if companies:
+                if not work_exp or not isinstance(work_exp, list):
+                    continue
+                cand_companies = [
+                    str(exp.get("companyName", "")).lower() 
+                    for exp in work_exp if isinstance(exp, dict)
+                ]
+                # Check if ANY of the requested companies are in ANY candidate company name
+                matched_company = False
+                for req_comp in companies:
+                    if any(req_comp in c for c in cand_companies):
+                        matched_company = True
+                        break
+                
+                if not matched_company:
                     continue
 
             # ── Location filter ───────────────────────────────────
@@ -418,50 +491,45 @@ class SearchService:
                     continue
                 # If no employment type data at all, include the candidate
 
-            # ── Text query filter (name / email / skill / location / resume) ─
+            # ── Text query filter / AI Score ──────────────────────────────
             relevance = 1.0
+            ai_score = None
+            matched_ai = []
+            
             if query_low:
-                # Resolve personalDetails: resumeParsedJson first, then personalDetails column
-                pd_info           = _resolve_personal_details(parsed_json, personal_details_col)
-                candidate_loc_str = (
-                    f"{pd_info.get('city','')} {pd_info.get('province','')} "
-                    f"{pd_info.get('location','')}"
-                ).lower().strip()
-                candidate_phone = (pd_info.get("phone") or "").lower()
-
-                # Build resume text for query matching
-                resume_snippet = ""
+                resume_text = ""
                 if parsed_json and isinstance(parsed_json, dict):
-                    resume_snippet = (
-                        parsed_json.get("text") or
-                        parsed_json.get("_raw_text") or ""
-                    )[:3000].lower()
+                    resume_text = parsed_json.get("_raw_text") or parsed_json.get("text", "") or ""
+                if not resume_text:
+                    resume_text = " ".join(skill_names)
+                
+                if resume_text:
+                    try:
+                        res = scoring_engine.score_with_embedding(
+                            resume_text    = resume_text,
+                            jd_description = query,
+                            query_embedding= query_embedding,
+                            keywords       = keywords,
+                            candidate_skills = skill_lower,
+                        )
+                        ai_score = float(res.get("score", 0.0))
+                        matched_ai = res.get("matched_skills", [])
+                    except Exception as e:
+                        logger.warning(f"Scoring error for candidate {user_id}: {e}")
+                        continue
+                        
+                if ai_score is not None and ai_score < 10.0:
+                    continue  # skip very poor matches
+                    
+                if ai_score is not None:
+                    relevance = ai_score
 
-                # Also pull work experience roles/titles
-                role_text = ""
-                if work_exp and isinstance(work_exp, list):
-                    for exp in work_exp:
-                        if isinstance(exp, dict):
-                            role_text += f" {exp.get('role','')} {exp.get('jobTitle','')}".lower()
-
-                text_blob = (
-                    f"{full_name} {email_str} {' '.join(skill_lower)} "
-                    f"{candidate_loc_str} {candidate_phone} "
-                    f"{role_text}"
-                )
-
-                # Match any word of the query against the blob (OR logic per word)
-                words = [w for w in query_low.split() if len(w) > 1]
-                if not any(word in text_blob for word in words):
-                    continue
-
-                # Boost relevance for closer matches
-                if query_low in full_name or query_low in email_str:
-                    relevance = 2.0
-                elif any(query_low in field for field in [candidate_loc_str, candidate_phone]):
-                    relevance = 1.5
-
-            card = _build_card(row, {"relevance": relevance})
+            card_extra = {"relevance": relevance}
+            if ai_score is not None:
+                card_extra["aiScore"] = round(ai_score, 2)
+                card_extra["matchedSkills"] = matched_ai
+                
+            card = _build_card(row, card_extra)
             results.append(card)
 
         # Sort: by relevance (text query boost), then by jobMatchScore
@@ -517,7 +585,7 @@ class SearchService:
              is_verified, user_status, created_at,
              profile_id, skills, education, work_exp,
              parse_status, personal_details_col, parsed_json,
-             job_match_score, matched_skills_list, application_status) = row
+             job_match_score, matched_skills_list, application_status, subscriptions_json) = row
 
             skill_names_list = _skill_names(skills)
             skill_lower = [s.lower() for s in skill_names_list]
