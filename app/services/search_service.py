@@ -318,7 +318,12 @@ class SearchService:
             f = f.dict(exclude_none=False)
 
         industry       = (f.get("industry") or f.get("category") or "").strip().lower()
-        companies      = [c.strip().lower() for c in (f.get("companies") or []) if c]
+        
+        companies_raw = f.get("companies") or f.get("company") or []
+        if isinstance(companies_raw, str):
+            companies_raw = [companies_raw]
+        companies = [str(c).strip().lower() for c in companies_raw if str(c).strip()]
+        
         locations      = [l.strip().lower() for l in (f.get("locations") or []) if l]
         req_skills     = [s.strip().lower() for s in (f.get("skills") or []) if s]
         job_types      = [j.strip().upper().replace("-", "_") for j in (f.get("jobType") or []) if j]
@@ -411,7 +416,7 @@ class SearchService:
                 if not work_exp or not isinstance(work_exp, list):
                     continue
                 cand_companies = [
-                    str(exp.get("companyName", "")).lower() 
+                    str(exp.get("companyName") or exp.get("company") or "").lower() 
                     for exp in work_exp if isinstance(exp, dict)
                 ]
                 # Check if ANY of the requested companies are in ANY candidate company name
