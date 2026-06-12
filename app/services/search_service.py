@@ -326,13 +326,19 @@ class SearchService:
         
         locations      = [l.strip().lower() for l in (f.get("locations") or []) if l]
         req_skills     = [s.strip().lower() for s in (f.get("skills") or []) if s]
-        job_types      = [j.strip().upper().replace("-", "_") for j in (f.get("jobType") or []) if j]
+        job_types      = [j.strip().upper().replace("-", "_").replace(" ", "_") for j in (f.get("jobType") or []) if j]
         exp_min        = f.get("experienceMin")
         exp_max        = f.get("experienceMax")
         salary_min     = f.get("salaryMin")
         salary_max     = f.get("salaryMax")
         min_score      = float(f.get("minMatchScore") or 0.0)
         query_low      = (query or "").strip().lower()
+
+        # Do not allow experience filter to work alone. Require at least one other search criteria.
+        if (exp_min is not None or exp_max is not None) and not any([
+            query_low, industry, companies, locations, req_skills, job_types, salary_min, salary_max
+        ]):
+            return []
 
         # Pre-compute query embedding once if query is provided
         query_embedding = None
@@ -486,15 +492,15 @@ class SearchService:
                         if isinstance(exp, dict):
                             et = str(exp.get("employmentType", "") or "").upper()
                             if et:
-                                candidate_types.add(et)
+                                candidate_types.add(et.replace("-", "_").replace(" ", "_"))
                 # Also check workType from parsed profile personalDetails
                 if parsed_json and isinstance(parsed_json, dict):
                     wt = str(parsed_json.get("workType") or "").upper()
                     if wt:
-                        candidate_types.add(wt)
-                if candidate_types and not any(jt in candidate_types for jt in job_types):
+                        candidate_types.add(wt.replace("-", "_").replace(" ", "_"))
+                if not candidate_types or not any(jt in candidate_types for jt in job_types):
                     continue
-                # If no employment type data at all, include the candidate
+                # If no employment type data at all, we now exclude the candidate since a specific jobType was requested
 
             # ── Text query filter / AI Score ──────────────────────────────
             relevance = 1.0
@@ -667,8 +673,10 @@ class SearchService:
         """
         import random
 
-        _SKILLS_SQL = text("""
-            SELECT elem->>'name' AS skill_name, COUNT(*) AS cnt
+        _SKILLS_CITIES_SQL = text("""
+            SELECT elem->>'name' AS skill_name,
+                   COALESCE(NULLIF(TRIM("personalDetails"->>'city'), ''),
+                            NULLIF(TRIM("personalDetails"->>'province'), '')) AS city
             FROM candidate_profiles,
                  jsonb_array_elements(
                      CASE
@@ -681,54 +689,37 @@ class SearchService:
             WHERE skills IS NOT NULL
               AND (elem->>'name') IS NOT NULL
               AND (elem->>'name') <> ''
-            GROUP BY skill_name
-            ORDER BY cnt DESC
-            LIMIT 15
-        """)
-
-        _CITIES_SQL = text("""
-            SELECT
-                COALESCE(
-                    NULLIF(TRIM("personalDetails"->>'city'), ''),
-                    NULLIF(TRIM("personalDetails"->>'province'), '')
-                ) AS city,
-                COUNT(*) AS cnt
-            FROM candidate_profiles
-            WHERE "personalDetails" IS NOT NULL
-              AND COALESCE(
-                    NULLIF(TRIM("personalDetails"->>'city'), ''),
-                    NULLIF(TRIM("personalDetails"->>'province'), '')
-                  ) IS NOT NULL
-            GROUP BY city
-            ORDER BY cnt DESC
-            LIMIT 10
+              AND "personalDetails" IS NOT NULL
+              AND COALESCE(NULLIF(TRIM("personalDetails"->>'city'), ''),
+                           NULLIF(TRIM("personalDetails"->>'province'), '')) IS NOT NULL
+            GROUP BY skill_name, city
+            ORDER BY COUNT(*) DESC
+            LIMIT 30
         """)
 
         try:
-            skill_rows = db.execute(_SKILLS_SQL).fetchall()
-            city_rows  = db.execute(_CITIES_SQL).fetchall()
+            skill_city_rows = db.execute(_SKILLS_CITIES_SQL).fetchall()
         except Exception as e:
             logger.warning(f"Suggestions query failed: {e}")
             return []
 
-        skills = [r[0] for r in skill_rows if r[0]]
-        cities  = [r[0] for r in city_rows  if r[0]]
-
-        if not skills:
+        if not skill_city_rows:
             return []
 
         templates: List[str] = []
 
-        if cities:
-            for skill in skills[:8]:
-                city = random.choice(cities)
-                templates += [
-                    f"Find {skill} developers in {city}",
-                    f"Show me {skill} candidates from {city}",
-                    f"Find candidates with {skill} skills in {city}",
-                    f"Top {skill} professionals in {city}",
-                ]
+        # Generate templates ONLY using combinations that actually exist in the DB
+        for r in skill_city_rows[:15]:
+            skill, city = r[0], r[1]
+            templates += [
+                f"Find {skill} developers in {city}",
+                f"Show me {skill} candidates from {city}",
+                f"Find candidates with {skill} skills in {city}",
+                f"Top {skill} professionals in {city}",
+            ]
 
+        # Extract unique skills from our guaranteed list
+        skills = list(set([r[0] for r in skill_city_rows]))
         for skill in skills[:10]:
             exp = random.choice(["2+", "3+", "5+"])
             templates += [
@@ -738,11 +729,8 @@ class SearchService:
                 f"Find {skill} engineers open to relocation",
             ]
 
-        if len(skills) >= 2:
-            pairs = list(zip(skills[:5], skills[5:10] or skills[:5]))
-            for s1, s2 in pairs:
-                templates.append(f"Candidates with both {s1} and {s2} experience")
-
+        # Extract unique cities from our guaranteed list
+        cities = list(set([r[1] for r in skill_city_rows]))
         for city in cities[:5]:
             templates.append(f"Show all candidates located in {city}")
 
