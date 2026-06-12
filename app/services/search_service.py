@@ -203,7 +203,13 @@ _CANDIDATE_SQL = text("""
         ja.status       AS application_status,
         subs.subscriptions_json
     FROM users u
-    LEFT JOIN candidate_profiles cp ON cp."userId" = u.id
+    INNER JOIN candidate_profiles cp ON cp."userId" = u.id
+                                     AND cp."deletedAt" IS NULL
+                                     AND (
+                                         cp."skills" IS NOT NULL
+                                         OR cp."workExperience" IS NOT NULL
+                                         OR cp."personalDetails" IS NOT NULL
+                                     )
     LEFT JOIN LATERAL (
         SELECT "jobMatchScore", "matchedSkillsList"
         FROM   matches
@@ -270,7 +276,7 @@ _CANDIDATE_SQL = text("""
     ) subs ON TRUE
     WHERE u.role = 'CANDIDATE'
       AND u."deletedAt" IS NULL
-    ORDER BY u.id DESC
+    ORDER BY m."jobMatchScore" DESC NULLS LAST, u.id DESC
 """)
 
 
@@ -329,6 +335,26 @@ class SearchService:
         job_types      = [j.strip().upper().replace("-", "_").replace(" ", "_") for j in (f.get("jobType") or []) if j]
         exp_min        = f.get("experienceMin")
         exp_max        = f.get("experienceMax")
+
+        # ── Parse experience label string e.g. "1-3 years" or "3+ years" ──
+        # Frontend may send experienceLabel instead of explicit min/max.
+        exp_label = str(f.get("experienceLabel") or "").strip()
+        if exp_label and exp_min is None and exp_max is None:
+            # Match "X-Y years" pattern
+            _range_match = re.match(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)", exp_label)
+            _plus_match  = re.match(r"(\d+(?:\.\d+)?)\s*\+", exp_label)
+            if _range_match:
+                exp_min = float(_range_match.group(1))
+                exp_max = float(_range_match.group(2))
+            elif _plus_match:
+                exp_min = float(_plus_match.group(1))
+
+        # Coerce to float if present
+        if exp_min is not None:
+            exp_min = float(exp_min)
+        if exp_max is not None:
+            exp_max = float(exp_max)
+
         salary_min     = f.get("salaryMin")
         salary_max     = f.get("salaryMax")
         min_score      = float(f.get("minMatchScore") or 0.0)
@@ -472,7 +498,13 @@ class SearchService:
                     continue
 
             # ── Experience range filter ──────────────────────────────
-            if exp_min is not None and years_exp < exp_min:
+            # When a minimum experience is required, strictly exclude:
+            #   1. Candidates with no work experience at all (work_exp is None/empty)
+            #   2. Candidates whose total computed experience is below exp_min
+            if exp_min is not None and exp_min > 0:
+                if not work_exp or years_exp < exp_min:
+                    continue
+            elif exp_min is not None and years_exp < exp_min:
                 continue
             if exp_max is not None and years_exp > exp_max:
                 continue
