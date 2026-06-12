@@ -502,13 +502,16 @@ class SearchService:
             matched_ai = []
             
             if query_low:
+                name_match = (query_low in full_name) or (query_low in email_str)
+                skill_match = any(query_low in s.lower() for s in skill_names)
+                
                 resume_text = ""
                 if parsed_json and isinstance(parsed_json, dict):
                     resume_text = parsed_json.get("_raw_text") or parsed_json.get("text", "") or ""
                 if not resume_text:
                     resume_text = " ".join(skill_names)
                 
-                if resume_text:
+                if resume_text and not name_match:
                     try:
                         res = scoring_engine.score_with_embedding(
                             resume_text    = resume_text,
@@ -521,13 +524,21 @@ class SearchService:
                         matched_ai = res.get("matched_skills", [])
                     except Exception as e:
                         logger.warning(f"Scoring error for candidate {user_id}: {e}")
-                        continue
+                        if not skill_match:
+                            continue
+                        ai_score = 50.0
                         
-                if ai_score is not None and ai_score < 10.0:
-                    continue  # skip very poor matches
-                    
-                if ai_score is not None:
+                if name_match:
+                    relevance = 100.0
+                    ai_score = 100.0
+                elif skill_match and (ai_score is None or ai_score < 10.0):
+                    relevance = 50.0
+                    ai_score = 50.0
+                elif ai_score is not None and ai_score >= 10.0:
                     relevance = ai_score
+                else:
+                    # If neither name, nor skill, nor semantic search matched well, skip
+                    continue
 
             card_extra = {"relevance": relevance}
             if ai_score is not None:
