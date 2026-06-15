@@ -360,11 +360,7 @@ class SearchService:
         min_score      = float(f.get("minMatchScore") or 0.0)
         query_low      = (query or "").strip().lower()
 
-        # Do not allow experience filter to work alone. Require at least one other search criteria.
-        if (exp_min is not None or exp_max is not None) and not any([
-            query_low, industry, companies, locations, req_skills, job_types, salary_min, salary_max
-        ]):
-            return []
+        # Note: experience filter is allowed to work on its own.
 
         # Pre-compute query embedding once if query is provided
         query_embedding = None
@@ -515,24 +511,47 @@ class SearchService:
             # (salary_min / salary_max are accepted in the request for forward-compat)
 
             # ── jobType / workType filter ────────────────────────────
-            # "REMOTE" and "HYBRID" are checked against resume/parsed data
+            # Checks employmentType on work experience entries, plus several
+            # parsed_json fields where job-type preference may be stored.
+            # Candidates with NO employment type data anywhere are passed through
+            # (we can't confirm they don't match, so we include them rather than
+            # silently dropping the whole result set).
             if job_types:
-                # Check if any of the candidate's work experience matches
                 candidate_types = set()
+
+                # 1. workExperience[].employmentType
                 if work_exp and isinstance(work_exp, list):
                     for exp in work_exp:
                         if isinstance(exp, dict):
-                            et = str(exp.get("employmentType", "") or "").upper()
+                            et = str(exp.get("employmentType", "") or "").upper().strip()
                             if et:
                                 candidate_types.add(et.replace("-", "_").replace(" ", "_"))
-                # Also check workType from parsed profile personalDetails
+
+                # 2. parsed_json top-level: workType / preferredWorkType / jobType
                 if parsed_json and isinstance(parsed_json, dict):
-                    wt = str(parsed_json.get("workType") or "").upper()
-                    if wt:
-                        candidate_types.add(wt.replace("-", "_").replace(" ", "_"))
-                if not candidate_types or not any(jt in candidate_types for jt in job_types):
+                    for key in ("workType", "preferredWorkType", "jobType", "employment_type"):
+                        val = str(parsed_json.get(key) or "").upper().strip()
+                        if val:
+                            candidate_types.add(val.replace("-", "_").replace(" ", "_"))
+                    # Also check inside structuredData if present
+                    sd = parsed_json.get("structuredData")
+                    if isinstance(sd, dict):
+                        for key in ("workType", "preferredWorkType", "jobType", "employment_type"):
+                            val = str(sd.get(key) or "").upper().strip()
+                            if val:
+                                candidate_types.add(val.replace("-", "_").replace(" ", "_"))
+
+                # 3. personalDetails column
+                if personal_details_col and isinstance(personal_details_col, dict):
+                    for key in ("workType", "preferredWorkType", "jobType", "employment_type"):
+                        val = str(personal_details_col.get(key) or "").upper().strip()
+                        if val:
+                            candidate_types.add(val.replace("-", "_").replace(" ", "_"))
+
+                # Only hard-exclude if we actually found type data AND none of it matches.
+                # If candidate_types is empty we have no data → pass through.
+                if candidate_types and not any(jt in candidate_types for jt in job_types):
                     continue
-                # If no employment type data at all, we now exclude the candidate since a specific jobType was requested
 
             # ── Text query filter / AI Score ──────────────────────────────
             relevance = 1.0
