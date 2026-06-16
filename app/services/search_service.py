@@ -297,7 +297,7 @@ class SearchService:
         based on `mode`.
         """
         if mode == "ai":
-            return SearchService._ai_search(db, query or "", limit)
+            return SearchService._ai_search(db, query or "", filters, limit)
         return SearchService._filter_search(db, query, filters, limit)
 
     # ----------------------------------------------------------------
@@ -332,7 +332,12 @@ class SearchService:
         
         locations      = [l.strip().lower() for l in (f.get("locations") or []) if l]
         req_skills     = [s.strip().lower() for s in (f.get("skills") or []) if s]
-        job_types      = [j.strip().upper().replace("-", "_").replace(" ", "_") for j in (f.get("jobType") or []) if j]
+        
+        raw_job_type = f.get("jobType") or []
+        if isinstance(raw_job_type, str):
+            raw_job_type = [raw_job_type]
+        job_types = [j.strip().upper().replace("-", "_").replace(" ", "_") for j in raw_job_type if j]
+        
         exp_min        = f.get("experienceMin")
         exp_max        = f.get("experienceMax")
 
@@ -548,10 +553,34 @@ class SearchService:
                         if val:
                             candidate_types.add(val.replace("-", "_").replace(" ", "_"))
 
-                # Only hard-exclude if we actually found type data AND none of it matches.
-                # If candidate_types is empty we have no data → pass through.
+                # Filter out location-based types (remote/hybrid) from schedule types
+                loc_types = {"REMOTE", "HYBRID", "ON_SITE"}
+                candidate_types = {ct for ct in candidate_types if ct not in loc_types}
+
                 if candidate_types and not any(jt in candidate_types for jt in job_types):
                     continue
+                elif not candidate_types:
+                    # No explicit schedule types. Full-Time is the default assumption.
+                    # If user strictly wants Part Time / Contract etc, fallback to scanning resume text.
+                    needs_text_check = any(jt in {"PART_TIME", "CONTRACT", "FREELANCE", "INTERNSHIP"} for jt in job_types)
+                    if needs_text_check:
+                        resume_text_blob = ""
+                        if parsed_json and isinstance(parsed_json, dict):
+                            resume_text_blob = (parsed_json.get("_raw_text") or parsed_json.get("text") or "").lower()
+                        
+                        text_matched = False
+                        for jt in job_types:
+                            if jt == "PART_TIME" and ("part time" in resume_text_blob or "part-time" in resume_text_blob):
+                                text_matched = True
+                            elif jt == "CONTRACT" and "contract" in resume_text_blob:
+                                text_matched = True
+                            elif jt == "FREELANCE" and "freelance" in resume_text_blob:
+                                text_matched = True
+                            elif jt == "INTERNSHIP" and ("internship" in resume_text_blob or "intern " in resume_text_blob):
+                                text_matched = True
+                        
+                        if not text_matched:
+                            continue
 
             # ── Text query filter / AI Score ──────────────────────────────
             relevance = 1.0
@@ -617,7 +646,7 @@ class SearchService:
     # ----------------------------------------------------------------
 
     @staticmethod
-    def _ai_search(db: Session, query: str, limit: int) -> List[Dict[str, Any]]:
+    def _ai_search(db: Session, query: str, filters: Optional[Any], limit: int) -> List[Dict[str, Any]]:
         """
         Natural language semantic search.
         Encodes the query with BERT and compares against each candidate's
@@ -643,6 +672,48 @@ class SearchService:
             location_filter = loc_match.group(1).strip()
             logger.info(f"AI search: extracted location filter = '{location_filter}'")
 
+        # ── Extract experience filter from natural-language query ───────────
+        # Matches: "1-3 years" or "8+ years"
+        exp_min: Optional[float] = None
+        exp_max: Optional[float] = None
+        _range_match = re.search(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*year", query_lower)
+        _plus_match  = re.search(r"(\d+(?:\.\d+)?)\s*\+\s*year", query_lower)
+        
+        if _range_match:
+            exp_min = float(_range_match.group(1))
+            exp_max = float(_range_match.group(2))
+            logger.info(f"AI search: extracted experience range = {exp_min} to {exp_max}")
+        elif _plus_match:
+            exp_min = float(_plus_match.group(1))
+            logger.info(f"AI search: extracted experience min = {exp_min}+")
+
+        # ── Parse filters for jobType ───────────────────────────────────────
+        f = filters
+        if f is None:
+            f = {}
+        if hasattr(f, "model_dump"):
+            f = f.model_dump(exclude_none=False)
+        elif hasattr(f, "dict"):
+            f = f.dict(exclude_none=False)
+            
+        raw_job_type = f.get("jobType") or []
+        if isinstance(raw_job_type, str):
+            raw_job_type = [raw_job_type]
+        job_types = [j.strip().upper().replace("-", "_").replace(" ", "_") for j in raw_job_type if j]
+
+        # ── Extract jobType from natural language if not in filters ───────
+        if not job_types:
+            if re.search(r"\b(?:full time|full-time)\b", query_lower):
+                job_types.append("FULL_TIME")
+            if re.search(r"\b(?:part time|part-time)\b", query_lower):
+                job_types.append("PART_TIME")
+            if re.search(r"\bcontract\b", query_lower):
+                job_types.append("CONTRACT")
+            if re.search(r"\bfreelance\b", query_lower):
+                job_types.append("FREELANCE")
+            if re.search(r"\binternship\b", query_lower):
+                job_types.append("INTERNSHIP")
+
         # Pre-compute query embedding once
         query_embedding = None
         keywords = [k for k in re.split(r"[\s,]+", query_lower) if len(k) > 2]
@@ -662,6 +733,7 @@ class SearchService:
 
             skill_names_list = _skill_names(skills)
             skill_lower = [s.lower() for s in skill_names_list]
+            years_exp   = _extract_years(work_exp)
 
             # ── Location hard-filter ──────────────────────────────────────
             if location_filter:
@@ -672,6 +744,73 @@ class SearchService:
                 ).lower().strip()
                 if location_filter not in cand_loc:
                     continue  # skip candidates not in specified location
+
+            # ── Experience hard-filter ────────────────────────────────────
+            if exp_min is not None and exp_min > 0:
+                if not work_exp or years_exp < exp_min:
+                    continue
+            elif exp_min is not None and years_exp < exp_min:
+                continue
+            if exp_max is not None and years_exp > exp_max:
+                continue
+
+            # ── jobType / workType hard-filter ──────────────────────────────
+            if job_types:
+                candidate_types = set()
+
+                if work_exp and isinstance(work_exp, list):
+                    for exp in work_exp:
+                        if isinstance(exp, dict):
+                            et = str(exp.get("employmentType", "") or "").upper().strip()
+                            if et:
+                                candidate_types.add(et.replace("-", "_").replace(" ", "_"))
+
+                if parsed_json and isinstance(parsed_json, dict):
+                    for key in ("workType", "preferredWorkType", "jobType", "employment_type"):
+                        val = str(parsed_json.get(key) or "").upper().strip()
+                        if val:
+                            candidate_types.add(val.replace("-", "_").replace(" ", "_"))
+                    sd = parsed_json.get("structuredData")
+                    if isinstance(sd, dict):
+                        for key in ("workType", "preferredWorkType", "jobType", "employment_type"):
+                            val = str(sd.get(key) or "").upper().strip()
+                            if val:
+                                candidate_types.add(val.replace("-", "_").replace(" ", "_"))
+
+                if personal_details_col and isinstance(personal_details_col, dict):
+                    for key in ("workType", "preferredWorkType", "jobType", "employment_type"):
+                        val = str(personal_details_col.get(key) or "").upper().strip()
+                        if val:
+                            candidate_types.add(val.replace("-", "_").replace(" ", "_"))
+
+                # Filter out location-based types (remote/hybrid) from schedule types
+                loc_types = {"REMOTE", "HYBRID", "ON_SITE"}
+                candidate_types = {ct for ct in candidate_types if ct not in loc_types}
+
+                if candidate_types and not any(jt in candidate_types for jt in job_types):
+                    continue
+                elif not candidate_types:
+                    # No explicit schedule types. Full-Time is the default assumption.
+                    # If user strictly wants Part Time / Contract etc, fallback to scanning resume text.
+                    needs_text_check = any(jt in {"PART_TIME", "CONTRACT", "FREELANCE", "INTERNSHIP"} for jt in job_types)
+                    if needs_text_check:
+                        resume_text_blob = ""
+                        if parsed_json and isinstance(parsed_json, dict):
+                            resume_text_blob = (parsed_json.get("_raw_text") or parsed_json.get("text") or "").lower()
+                        
+                        text_matched = False
+                        for jt in job_types:
+                            if jt == "PART_TIME" and ("part time" in resume_text_blob or "part-time" in resume_text_blob):
+                                text_matched = True
+                            elif jt == "CONTRACT" and "contract" in resume_text_blob:
+                                text_matched = True
+                            elif jt == "FREELANCE" and "freelance" in resume_text_blob:
+                                text_matched = True
+                            elif jt == "INTERNSHIP" and ("internship" in resume_text_blob or "intern " in resume_text_blob):
+                                text_matched = True
+                        
+                        if not text_matched:
+                            continue
 
             # Build resume text corpus for semantic scoring
             resume_text = ""
