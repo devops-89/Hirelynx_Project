@@ -333,10 +333,6 @@ class SearchService:
         locations      = [l.strip().lower() for l in (f.get("locations") or []) if l]
         req_skills     = [s.strip().lower() for s in (f.get("skills") or []) if s]
         
-        raw_job_type = f.get("jobType") or f.get("jobTypes") or f.get("job_type") or f.get("employmentType") or f.get("workType") or []
-        if isinstance(raw_job_type, str):
-            raw_job_type = [raw_job_type]
-            
         # Helper to extract strings from nested dicts (e.g. React Select objects)
         def _extract_strings(item):
             if isinstance(item, str): return [item]
@@ -346,6 +342,14 @@ class SearchService:
                 return [s for v in item for s in _extract_strings(v)]
             return [str(item)]
 
+        raw_job_type = f.get("jobType") or f.get("jobTypes") or f.get("job_type") or f.get("employmentType") or f.get("workType") or f.get("Job Type") or []
+        if not raw_job_type:
+            # Bulletproof fallback: search the entire payload for job types
+            raw_job_type = _extract_strings(f)
+
+        if isinstance(raw_job_type, str):
+            raw_job_type = [raw_job_type]
+            
         job_types = []
         for j in _extract_strings(raw_job_type):
             if not j: continue
@@ -362,7 +366,15 @@ class SearchService:
 
         # ── Parse experience label string e.g. "1-3 years" or "3+ years" ──
         # Frontend may send experienceLabel instead of explicit min/max.
-        exp_label = str(f.get("experienceLabel") or "").strip()
+        exp_label = str(f.get("experienceLabel") or f.get("experience") or f.get("Experience") or f.get("Experience (Years)") or "").strip()
+        
+        # Bulletproof fallback: scan all strings in the payload for a range pattern
+        if not exp_label and exp_min is None and exp_max is None:
+            for s in _extract_strings(f):
+                if re.match(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)", s) or re.match(r"(\d+(?:\.\d+)?)\s*\+", s):
+                    exp_label = s
+                    break
+
         if exp_label and exp_min is None and exp_max is None:
             # Match "X-Y years" pattern
             _range_match = re.match(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)", exp_label)
@@ -705,6 +717,37 @@ class SearchService:
         elif _plus_match:
             exp_min = float(_plus_match.group(1))
             logger.info(f"AI search: extracted experience min = {exp_min}+")
+            
+        # ── Parse experience from structured filters if not in query ───────
+        if exp_min is None and exp_max is None and filters:
+            f_dict = filters.model_dump(exclude_none=False) if hasattr(filters, "model_dump") else (filters.dict(exclude_none=False) if hasattr(filters, "dict") else filters)
+            exp_min = f_dict.get("experienceMin")
+            exp_max = f_dict.get("experienceMax")
+            exp_label = str(f_dict.get("experienceLabel") or f_dict.get("experience") or f_dict.get("Experience") or f_dict.get("Experience (Years)") or "").strip()
+            
+            def _extract_strings_temp(item):
+                if isinstance(item, str): return [item]
+                if isinstance(item, dict): return [s for v in item.values() for s in _extract_strings_temp(v)]
+                if isinstance(item, list): return [s for v in item for s in _extract_strings_temp(v)]
+                return [str(item)]
+
+            if not exp_label and exp_min is None and exp_max is None:
+                for s in _extract_strings_temp(f_dict):
+                    if re.match(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)", s) or re.match(r"(\d+(?:\.\d+)?)\s*\+", s):
+                        exp_label = s
+                        break
+
+            if exp_label and exp_min is None and exp_max is None:
+                _r_match = re.match(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)", exp_label)
+                _p_match = re.match(r"(\d+(?:\.\d+)?)\s*\+", exp_label)
+                if _r_match:
+                    exp_min = float(_r_match.group(1))
+                    exp_max = float(_r_match.group(2))
+                elif _p_match:
+                    exp_min = float(_p_match.group(1))
+
+            if exp_min is not None: exp_min = float(exp_min)
+            if exp_max is not None: exp_max = float(exp_max)
 
         # ── Parse filters for jobType ───────────────────────────────────────
         f = filters
@@ -715,10 +758,6 @@ class SearchService:
         elif hasattr(f, "dict"):
             f = f.dict(exclude_none=False)
             
-        raw_job_type = f.get("jobType") or f.get("jobTypes") or f.get("job_type") or f.get("employmentType") or f.get("workType") or []
-        if isinstance(raw_job_type, str):
-            raw_job_type = [raw_job_type]
-            
         def _extract_strings(item):
             if isinstance(item, str): return [item]
             if isinstance(item, dict):
@@ -726,6 +765,13 @@ class SearchService:
             if isinstance(item, list):
                 return [s for v in item for s in _extract_strings(v)]
             return [str(item)]
+
+        raw_job_type = f.get("jobType") or f.get("jobTypes") or f.get("job_type") or f.get("employmentType") or f.get("workType") or f.get("Job Type") or []
+        if not raw_job_type:
+            raw_job_type = _extract_strings(f)
+            
+        if isinstance(raw_job_type, str):
+            raw_job_type = [raw_job_type]
 
         job_types = []
         for j in _extract_strings(raw_job_type):
