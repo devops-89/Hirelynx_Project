@@ -42,11 +42,21 @@ async def smart_search_candidates(
             suggestions = _SS.get_suggestions(db, count=min(body.limit, 20))
             return {"suggestions": suggestions}
 
+        # Merge any root-level extra fields into filters (in case frontend forgot to nest them)
+        merged_filters = {}
+        if body.filters:
+            merged_filters = body.filters.model_dump(exclude_none=False)
+        if hasattr(body, "model_dump"):
+            root_extras = body.model_dump(exclude_none=False)
+            for k, v in root_extras.items():
+                if k not in ("mode", "query", "filters", "limit") and v is not None:
+                    merged_filters[k] = v
+
         results = SearchService.smart_search(
             db      = db,
             mode    = body.mode,
             query   = body.query,
-            filters = body.filters,
+            filters = merged_filters,
             limit   = min(body.limit, 100),
         )
         return {"results": results, "count": len(results)}

@@ -333,10 +333,29 @@ class SearchService:
         locations      = [l.strip().lower() for l in (f.get("locations") or []) if l]
         req_skills     = [s.strip().lower() for s in (f.get("skills") or []) if s]
         
-        raw_job_type = f.get("jobType") or []
+        raw_job_type = f.get("jobType") or f.get("jobTypes") or f.get("job_type") or f.get("employmentType") or f.get("workType") or []
         if isinstance(raw_job_type, str):
             raw_job_type = [raw_job_type]
-        job_types = [j.strip().upper().replace("-", "_").replace(" ", "_") for j in raw_job_type if j]
+            
+        # Helper to extract strings from nested dicts (e.g. React Select objects)
+        def _extract_strings(item):
+            if isinstance(item, str): return [item]
+            if isinstance(item, dict):
+                return [s for v in item.values() for s in _extract_strings(v)]
+            if isinstance(item, list):
+                return [s for v in item for s in _extract_strings(v)]
+            return [str(item)]
+
+        job_types = []
+        for j in _extract_strings(raw_job_type):
+            if not j: continue
+            s = str(j).strip().upper().replace("-", "_").replace(" ", "_")
+            if s == "PARTTIME": s = "PART_TIME"
+            if s == "FULLTIME": s = "FULL_TIME"
+            # Only append actual job types to avoid polluting with labels
+            if s in {"PART_TIME", "FULL_TIME", "CONTRACT", "FREELANCE", "INTERNSHIP"}:
+                job_types.append(s)
+        job_types = list(set(job_types))
         
         exp_min        = f.get("experienceMin")
         exp_max        = f.get("experienceMax")
@@ -696,10 +715,27 @@ class SearchService:
         elif hasattr(f, "dict"):
             f = f.dict(exclude_none=False)
             
-        raw_job_type = f.get("jobType") or []
+        raw_job_type = f.get("jobType") or f.get("jobTypes") or f.get("job_type") or f.get("employmentType") or f.get("workType") or []
         if isinstance(raw_job_type, str):
             raw_job_type = [raw_job_type]
-        job_types = [j.strip().upper().replace("-", "_").replace(" ", "_") for j in raw_job_type if j]
+            
+        def _extract_strings(item):
+            if isinstance(item, str): return [item]
+            if isinstance(item, dict):
+                return [s for v in item.values() for s in _extract_strings(v)]
+            if isinstance(item, list):
+                return [s for v in item for s in _extract_strings(v)]
+            return [str(item)]
+
+        job_types = []
+        for j in _extract_strings(raw_job_type):
+            if not j: continue
+            s = str(j).strip().upper().replace("-", "_").replace(" ", "_")
+            if s == "PARTTIME": s = "PART_TIME"
+            if s == "FULLTIME": s = "FULL_TIME"
+            if s in {"PART_TIME", "FULL_TIME", "CONTRACT", "FREELANCE", "INTERNSHIP"}:
+                job_types.append(s)
+        job_types = list(set(job_types))
 
         # ── Extract jobType from natural language if not in filters ───────
         if not job_types:
