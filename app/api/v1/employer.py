@@ -15,9 +15,9 @@ async def create_employer_company_profile(
 
     Steps:
       1. Extracts employer/company data from whichever shape is sent.
-      2. Scrapes the company website (4s timeout) for real company content.
-      3. Sends scraped content + employer data to Groq (1s timeout).
-      4. Returns a personalized company summary.
+      2. Scrapes the company website (if URL is provided).
+      3. Sends manually entered details (and scraped content if available) to Groq/Gemini LLM to generate/enhance summary.
+      4. Returns a personalized, AI-enhanced company summary.
 
     No auth required — Node.js backend calls this directly after employer login.
 

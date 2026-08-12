@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # LLM helper — Groq for all summarization tasks
 # ---------------------------------------------------------------------------
-def _llm_generate(prompt: str, max_tokens: int = 400, temperature: float = 0.7) -> Optional[str]:
+def _llm_generate(prompt: str, max_tokens: int = 400, temperature: float = 0.95) -> Optional[str]:
     """
     Generate text via Groq API. Returns None on failure so callers can fallback.
     """
