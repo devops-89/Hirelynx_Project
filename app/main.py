@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import settings
-from app.api.v1 import health, parser, scoring, admin, candidate, recruiter, employer
+from app.api.v1 import health, parser, scoring, admin, candidate, recruiter, employer, interview
 import logging
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ app.include_router(admin.router, prefix="/v1")
 app.include_router(candidate.router, prefix="/v1")
 app.include_router(recruiter.router, prefix="/v1")
 app.include_router(employer.router, prefix="/v1")
+app.include_router(interview.router, prefix="/v1")
 
 @app.on_event("startup")
 async def startup_event():

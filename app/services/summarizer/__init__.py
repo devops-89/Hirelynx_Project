@@ -5,6 +5,7 @@ from .job import (
     generate_responsibilities_from_scratch,
 )
 from .employer import summarize_employer_profile
+from .interview import summarize_interview_transcript
 
 __all__ = [
     "SummarizerService",
@@ -13,4 +14,5 @@ __all__ = [
     "generate_personalized_responsibilities",
     "generate_responsibilities_from_scratch",
     "summarize_employer_profile",
+    "summarize_interview_transcript",
 ]

@@ -16,21 +16,23 @@ def _llm_generate(prompt: str, max_tokens: int = 400, temperature: float = 0.95)
     """
     Generate text via Groq API. Returns None on failure so callers can fallback.
     """
-    # 1. Try Groq (Primary)
-    try:
-        from groq import Groq
-        api_key = getattr(settings, "GROQ_API_KEY", None)
-        if api_key:
-            client = Groq(api_key=api_key)
-            resp = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            return resp.choices[0].message.content.strip()
-    except Exception as e:
-        logger.warning(f"Groq LLM failed (Rate Limit/Down). Routing to Gemini: {e}")
+    # 1. Try Groq primary model
+    _GROQ_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
+    api_key = getattr(settings, "GROQ_API_KEY", None)
+    if api_key:
+        for groq_model in _GROQ_MODELS:
+            try:
+                from groq import Groq
+                client = Groq(api_key=api_key)
+                resp = client.chat.completions.create(
+                    model=groq_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                return resp.choices[0].message.content.strip()
+            except Exception as e:
+                logger.warning(f"Groq model '{groq_model}' failed: {e}. Trying next model...")
 
     # 2. Try Gemini (Fallback)
     try:
@@ -38,7 +40,7 @@ def _llm_generate(prompt: str, max_tokens: int = 400, temperature: float = 0.95)
         gemini_api_key = getattr(settings, "GEMINI_API_KEY", None)
         if gemini_api_key:
             genai.configure(api_key=gemini_api_key)
-            model = genai.GenerativeModel('gemini-3-flash-preview')
+            model = genai.GenerativeModel('gemini-1.5-flash')
             # Use at least 1024 tokens so summaries are never cut mid-sentence
             gemini_max_tokens = max(max_tokens, 1024)
             response = model.generate_content(

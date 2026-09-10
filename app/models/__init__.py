@@ -1,6 +1,7 @@
 from .candidate import DBCandidate
 from .job import DBJob, DBNocOccupation
 from .match import DBMatch
+from .interview import DBJobInterview, DBMockInterview
 
 # Import schemas for backward compatibility
 from app.schemas.candidate import (

@@ -1,5 +1,6 @@
 import logging
 import re
+# pyrefly: ignore [missing-import]
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from sentence_transformers import SentenceTransformer
