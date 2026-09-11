@@ -48,3 +48,4 @@ async def summarize_interview(
         raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")
 
     return {"summary": summary}
+
