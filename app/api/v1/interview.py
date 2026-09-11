@@ -20,12 +20,12 @@ async def summarize_interview(
     - **Returns**: `{ "summary": "<structured AI summary>" }`
 
     The summary includes:
-      - 🎯 Snapshot of the interview
-      - 💬 Key topics covered
-      - ✅ Standout strengths
-      - ⚠️  Red flags & gaps
-      - 📊 Performance breakdown table
-      - 🔮 Recommendation
+      - Snapshot of the interview
+      - Key topics covered
+      - Standout strengths
+      - Red flags & gaps
+      - Performance breakdown table
+      - Recommendation
     """
     # --- Auth: ADMIN only ---
     token = credentials.credentials
